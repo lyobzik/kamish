@@ -4,6 +4,7 @@ import java.util.Properties
 
 import kafka.consumer.ConsumerConfig
 import org.apache.kafka.clients.consumer.{ConsumerRecord, KafkaConsumer}
+import org.apache.kafka.clients.producer.{Callback, KafkaProducer, ProducerRecord, RecordMetadata}
 import org.apache.kafka.common.serialization._
 
 import collection.JavaConversions._
@@ -26,6 +27,12 @@ class Config(configPath: String) {
     outputKafkaServers, outputKafkaTopic)
 }
 
+class OnProduceMessage extends Callback {
+  override def onCompletion(metadata: RecordMetadata, exception: Exception): Unit =
+    println("Produce record:\n  " + metadata.partition() + " - " +
+      metadata.offset() + ": '" + metadata.toString + "' with exception " + exception.toString)
+}
+
 object HelloWorld extends App {
   val parser = new scopt.OptionParser[Arguments]("kamish") {
     opt[String]('c', "config").action((x, c) => c.copy(config = x)).text("path to config file")
@@ -34,6 +41,7 @@ object HelloWorld extends App {
   parser.parse(args, Arguments()) match {
     case Some(arguments) =>
       val config = new Config(arguments.config)
+
       val consumerConfig = Map(
         "group.id" -> "kamish",
         "bootstrap.servers" -> config.inputKafkaServers,
@@ -44,6 +52,12 @@ object HelloWorld extends App {
       println("subscription: " + consumer.subscription())
       println("assignment: " + consumer.assignment())
       consumer.seekToBeginning(consumer.assignment())
+
+      val producerConfig = Map(
+        "bootstrap.servers" -> config.outputKafkaServers,
+        "key.serializer" -> classOf[StringSerializer].getName,
+        "value.serializer" -> classOf[StringSerializer].getName)
+      val producer = new KafkaProducer[String, String](producerConfig)
 
       println("consumer: " + consumer)
       println("run with args: " + arguments.toString)
@@ -57,9 +71,13 @@ object HelloWorld extends App {
           if (records.nonEmpty) {
             println("Read " + records.size + " records")
           }
-          records.foreach((record: ConsumerRecord[String, String]) =>
-            println("Received record:\n  " + record.partition() + " - " +
-              record.offset() + ": " + record.value()))
+          records.foreach((record: ConsumerRecord[String, String]) => {
+            val outputRecord = new ProducerRecord[String, String](config.outputKafkaTopic, record.partition(),
+              record.offset().toString, record.value())
+            val resultMetadata = producer.send(outputRecord).get()
+            println("Produce record:\n  " + resultMetadata.partition() + " - " +
+              resultMetadata.offset() + ": '" + record.value())
+          })
         }
       } catch {
         case err: Exception => println("Error: " + err)
