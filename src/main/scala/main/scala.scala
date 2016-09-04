@@ -1,8 +1,6 @@
 package main
 
-import java.util.Properties
-
-import kafka.consumer.ConsumerConfig
+import com.typesafe.scalalogging.LazyLogging
 import org.apache.kafka.clients.consumer.{ConsumerRecord, KafkaConsumer}
 import org.apache.kafka.clients.producer.{Callback, KafkaProducer, ProducerRecord, RecordMetadata}
 import org.apache.kafka.common.serialization._
@@ -27,13 +25,16 @@ class Config(configPath: String) {
     outputKafkaServers, outputKafkaTopic)
 }
 
-class OnProduceMessage extends Callback {
-  override def onCompletion(metadata: RecordMetadata, exception: Exception): Unit =
-    println("Produce record:\n  " + metadata.partition() + " - " +
-      metadata.offset() + ": '" + metadata.toString + "' with exception " + exception.toString)
+class OnProduceMessage(private val value: String) extends Callback with LazyLogging {
+  override def onCompletion(metadata: RecordMetadata, exception: Exception): Unit = {
+    val exceptDesc = if (exception != null) exception.toString else  "NONE"
+    logger.info(s"Produce record:  ${metadata.partition} - ${metadata.offset}: '$value' with exception $exceptDesc")
+//    logger.info("Produce record:  " + metadata.partition() + " - " +
+//      metadata.offset() + ": '" + value + "' with exception " + exceptDesc)
+  }
 }
 
-object HelloWorld extends App {
+object HelloWorld extends App with LazyLogging {
   val parser = new scopt.OptionParser[Arguments]("kamish") {
     opt[String]('c', "config").action((x, c) => c.copy(config = x)).text("path to config file")
   }
@@ -59,28 +60,26 @@ object HelloWorld extends App {
         "value.serializer" -> classOf[StringSerializer].getName)
       val producer = new KafkaProducer[String, String](producerConfig)
 
-      println("consumer: " + consumer)
-      println("run with args: " + arguments.toString)
-      println("run with config: " + consumerConfig)
+      logger.info(s"consumer: $consumer")
+      logger.info(s"run with args: ${arguments.toString}")
+      logger.info(s"run with config: $consumerConfig")
 
       try {
         while (true) {
           val records = consumer.poll(1000)
-          println("subscription: " + consumer.subscription())
-          println("assignment: " + consumer.assignment())
+          logger.debug(s"subscription: ${consumer.subscription}")
+          logger.debug(s"assignment: ${consumer.assignment}")
           if (records.nonEmpty) {
-            println("Read " + records.size + " records")
+            logger.info(s"Read ${records.size} records")
           }
           records.foreach((record: ConsumerRecord[String, String]) => {
             val outputRecord = new ProducerRecord[String, String](config.outputKafkaTopic, record.partition(),
               record.offset().toString, record.value())
-            val resultMetadata = producer.send(outputRecord).get()
-            println("Produce record:\n  " + resultMetadata.partition() + " - " +
-              resultMetadata.offset() + ": '" + record.value())
+            producer.send(outputRecord, new OnProduceMessage(record.value))
           })
         }
       } catch {
-        case err: Exception => println("Error: " + err)
+        case err: Exception => logger.error(s"Error: $err")
       } finally {
         consumer.close()
       }
