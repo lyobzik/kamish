@@ -9,28 +9,10 @@ import collection.JavaConversions._
 
 case class Arguments(config: String = "/etc/kamish.conf")
 
-class Config(configPath: String) {
-  import java.io.File
-  import com.typesafe._
-  private[this] val conf = config.ConfigFactory.parseFile(new File(configPath))
-
-  // Let it crash in incorrect config
-  val inputKafkaServers = conf.getStringList("input.kafka.servers")
-  val inputKafkaTopic = conf.getString("input.kafka.topic")
-
-  val outputKafkaServers = conf.getStringList("output.kafka.servers")
-  val outputKafkaTopic = conf.getString("output.kafka.topic")
-
-  override def toString = "{%s, %s -> %s, %s}".format(inputKafkaServers, inputKafkaTopic,
-    outputKafkaServers, outputKafkaTopic)
-}
-
 class OnProduceMessage(private val value: String) extends Callback with LazyLogging {
   override def onCompletion(metadata: RecordMetadata, exception: Exception): Unit = {
     val exceptDesc = if (exception != null) exception.toString else  "NONE"
     logger.info(s"Produce record:  ${metadata.partition} - ${metadata.offset}: '$value' with exception $exceptDesc")
-//    logger.info("Produce record:  " + metadata.partition() + " - " +
-//      metadata.offset() + ": '" + value + "' with exception " + exceptDesc)
   }
 }
 
@@ -42,27 +24,21 @@ object HelloWorld extends App with LazyLogging {
   parser.parse(args, Arguments()) match {
     case Some(arguments) =>
       val config = new Config(arguments.config)
+      logger.info(s"run with args: ${arguments.toString}")
+      logger.info(s"run with config: $config")
 
-      val consumerConfig = Map(
-        "group.id" -> "kamish",
-        "bootstrap.servers" -> config.inputKafkaServers,
-        "key.deserializer" -> classOf[StringDeserializer].getName,
-        "value.deserializer" -> classOf[StringDeserializer].getName)
-      val consumer = new KafkaConsumer[String, String](consumerConfig)
+      // TODO: добавить обработчики ребалансировок, в которых бы определялся последний
+      // записанные в outputTopic offset и этот offset устанавливался в consumer.
+      val consumer = new KafkaConsumer[String, String](config.inputKafka)
       consumer.subscribe(List(config.inputKafkaTopic))
       println("subscription: " + consumer.subscription())
       println("assignment: " + consumer.assignment())
       consumer.seekToBeginning(consumer.assignment())
 
-      val producerConfig = Map(
-        "bootstrap.servers" -> config.outputKafkaServers,
-        "key.serializer" -> classOf[StringSerializer].getName,
-        "value.serializer" -> classOf[StringSerializer].getName)
-      val producer = new KafkaProducer[String, String](producerConfig)
+      // TODO: хорошо бы научиться менять тип ключа producer'а на основании key.serializer в конфиге.
+      val producer = new KafkaProducer[String, String](config.outputKafka)
 
       logger.info(s"consumer: $consumer")
-      logger.info(s"run with args: ${arguments.toString}")
-      logger.info(s"run with config: $consumerConfig")
 
       try {
         while (true) {
@@ -73,12 +49,16 @@ object HelloWorld extends App with LazyLogging {
             logger.info(s"Read ${records.size} records")
           }
           records.foreach((record: ConsumerRecord[String, String]) => {
+            // TODO: добавить настраиваемое смещение key относительно исходного offset'а.
             val outputRecord = new ProducerRecord[String, String](config.outputKafkaTopic, record.partition(),
               record.offset().toString, record.value())
+            // TODO: обрабатывать ошибки отправки сообщений, понять посылает ли producer сообщения
+            // повторно сам или это нужно делать вручную.
             producer.send(outputRecord, new OnProduceMessage(record.value))
           })
         }
       } catch {
+        // TODO: сделать обработку ошибок.
         case err: Exception => logger.error(s"Error: $err")
       } finally {
         consumer.close()
