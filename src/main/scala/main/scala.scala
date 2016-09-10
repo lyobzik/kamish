@@ -96,30 +96,24 @@ object HelloWorld extends App with LazyLogging {
   val parser = new scopt.OptionParser[Arguments]("kamish") {
     opt[String]('c', "config").action((x, c) => c.copy(config = x)).text("path to config file")
   }
-  private var workThread: Thread = _
 
   parser.parse(args, Arguments()) match {
     case Some(arguments) =>
-      workThread = spawn {
-        work(arguments)
+      val config = new Config(arguments.config)
+      logger.info(s"run with args: ${arguments.toString}")
+      logger.info(s"run with config: $config")
+
+      val workThread = spawn {
+        work(config)
       }
+      sys.addShutdownHook({
+        shutdown(config, workThread)
+      })
+
     case None =>
   }
 
-  sys.addShutdownHook({
-    if (workThread != null) {
-      workThread.interrupt()
-      // TODO: вынести время ожидания в настройки
-      workThread.join(1000)
-      logger.info("Stopped")
-    }
-  })
-
-  private[this] def work(arguments: Arguments): Unit = {
-    val config = new Config(arguments.config)
-    logger.info(s"run with args: ${arguments.toString}")
-    logger.info(s"run with config: $config")
-
+  private[this] def work(config: Config): Unit = {
     val consumer = new KafkaConsumer[String, String](config.inputKafka)
     val rebalanceListener = new OnConsumerRebalance(consumer, config.outputKafkaTopic,
       config.inputKafka, config.outputKafka)
@@ -134,8 +128,7 @@ object HelloWorld extends App with LazyLogging {
 
     try {
       while (!Thread.currentThread.isInterrupted) {
-        // TODO: вынести poll timeout в настройки.
-        val records = consumer.poll(100)
+        val records = consumer.poll(config.pollTimeout.toMillis)
         logger.debug(s"subscription: ${consumer.subscription}")
         logger.debug(s"assignment: ${consumer.assignment}")
         if (records.nonEmpty) {
@@ -158,6 +151,14 @@ object HelloWorld extends App with LazyLogging {
       producer.close()
     }
     logger.info("Work thread stopped")
+  }
+
+  private[this] def shutdown(config: Config, thread: Thread): Unit = {
+    if (thread != null) {
+      thread.interrupt()
+      thread.join(config.shutdownTimeout.toMillis)
+      logger.info("Stopped")
+    }
   }
 
   private[this] def spawn(function: => Unit): Thread = {
