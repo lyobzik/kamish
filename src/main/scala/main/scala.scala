@@ -59,6 +59,8 @@ class OnConsumerRebalance(private val consumer: KafkaConsumer[String, String],
     nonemptyPartitions.foreach{case (partition, position) => consumer.seek(partition, position)}
     val records = readAll(consumer)
 
+    consumer.close()
+
     (emptyPartitions.map(_._1.partition).toList,
       records.map(record => record.partition -> (record.key.toLong + 1)).toMap)
   }
@@ -94,52 +96,75 @@ object HelloWorld extends App with LazyLogging {
   val parser = new scopt.OptionParser[Arguments]("kamish") {
     opt[String]('c', "config").action((x, c) => c.copy(config = x)).text("path to config file")
   }
+  private var workThread: Thread = _
 
   parser.parse(args, Arguments()) match {
     case Some(arguments) =>
-      val config = new Config(arguments.config)
-      logger.info(s"run with args: ${arguments.toString}")
-      logger.info(s"run with config: $config")
-
-      // TODO: добавить обработчики ребалансировок, в которых бы определялся последний
-      // записанные в outputTopic offset и этот offset устанавливался в consumer.
-      val consumer = new KafkaConsumer[String, String](config.inputKafka)
-      val rebalanceListener = new OnConsumerRebalance(consumer, config.outputKafkaTopic,
-        config.inputKafka, config.outputKafka)
-      consumer.subscribe(List(config.inputKafkaTopic), rebalanceListener)
-      println("subscription: " + consumer.subscription())
-      println("assignment: " + consumer.assignment())
-//      consumer.seekToBeginning(consumer.assignment())
-
-      // TODO: хорошо бы научиться менять тип ключа producer'а на основании key.serializer в конфиге.
-      val producer = new KafkaProducer[String, String](config.outputKafka)
-
-      logger.info(s"consumer: $consumer")
-
-      try {
-        while (true) {
-          val records = consumer.poll(1000)
-          logger.debug(s"subscription: ${consumer.subscription}")
-          logger.debug(s"assignment: ${consumer.assignment}")
-          if (records.nonEmpty) {
-            logger.info(s"Read ${records.size} records")
-          }
-          records.foreach((record: ConsumerRecord[String, String]) => {
-            // TODO: добавить настраиваемое смещение key относительно исходного offset'а.
-            val outputRecord = new ProducerRecord[String, String](config.outputKafkaTopic, record.partition(),
-              record.offset().toString, record.value())
-            // TODO: обрабатывать ошибки отправки сообщений, понять посылает ли producer сообщения
-            // повторно сам или это нужно делать вручную.
-            producer.send(outputRecord, new OnProduceMessage(record.value))
-          })
-        }
-      } catch {
-        // TODO: сделать обработку ошибок.
-        case err: Exception => logger.error(s"Error: $err")
-      } finally {
-        consumer.close()
+      workThread = spawn {
+        work(arguments)
       }
-
     case None =>
+  }
+
+  sys.addShutdownHook({
+    if (workThread != null) {
+      workThread.interrupt()
+      // TODO: вынести время ожидания в настройки
+      workThread.join(1000)
+      logger.info("Stopped")
+    }
+  })
+
+  private[this] def work(arguments: Arguments): Unit = {
+    val config = new Config(arguments.config)
+    logger.info(s"run with args: ${arguments.toString}")
+    logger.info(s"run with config: $config")
+
+    val consumer = new KafkaConsumer[String, String](config.inputKafka)
+    val rebalanceListener = new OnConsumerRebalance(consumer, config.outputKafkaTopic,
+      config.inputKafka, config.outputKafka)
+    consumer.subscribe(List(config.inputKafkaTopic), rebalanceListener)
+    println("subscription: " + consumer.subscription())
+    println("assignment: " + consumer.assignment())
+
+    // TODO: хорошо бы научиться менять тип ключа producer'а на основании key.serializer в конфиге.
+    val producer = new KafkaProducer[String, String](config.outputKafka)
+
+    logger.info(s"consumer: $consumer")
+
+    try {
+      while (!Thread.currentThread.isInterrupted) {
+        // TODO: вынести poll timeout в настройки.
+        val records = consumer.poll(100)
+        logger.debug(s"subscription: ${consumer.subscription}")
+        logger.debug(s"assignment: ${consumer.assignment}")
+        if (records.nonEmpty) {
+          logger.info(s"Read ${records.size} records")
+        }
+        records.foreach((record: ConsumerRecord[String, String]) => {
+          // TODO: добавить настраиваемое смещение key относительно исходного offset'а.
+          val outputRecord = new ProducerRecord[String, String](config.outputKafkaTopic, record.partition(),
+            record.offset().toString, record.value())
+          // TODO: обрабатывать ошибки отправки сообщений, понять посылает ли producer сообщения
+          // повторно сам или это нужно делать вручную.
+          producer.send(outputRecord, new OnProduceMessage(record.value))
+        })
+      }
+    } catch {
+      // TODO: сделать обработку ошибок.
+      case err: Exception => logger.error(s"Error: $err")
+    } finally {
+      consumer.close()
+      producer.close()
+    }
+    logger.info("Work thread stopped")
+  }
+
+  private[this] def spawn(function: => Unit): Thread = {
+    val thread = new Thread(new Runnable {
+      override def run(): Unit = function
+    })
+    thread.start()
+    thread
   }
 }
