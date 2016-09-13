@@ -38,6 +38,7 @@ class Config(configPath: String) {
     val defaultSettings = Map(
       "input.kafka.key.deserializer" -> classOf[StringDeserializer].getName,
       "input.kafka.value.deserializer" -> classOf[StringDeserializer].getName,
+      "input.kafka.enable.auto.commit" -> false,
       "output.kafka.value.serializer" -> classOf[StringSerializer].getName,
 
       "shutdownTimeout" -> Duration.ofMillis(1000),
@@ -58,6 +59,9 @@ class Config(configPath: String) {
 
     if (inputKafka("group.id").asInstanceOf[String].isEmpty) {
       throw new Exception("Input group.id is required")
+    }
+    if (inputKafka("enable.auto.commit").asInstanceOf[Boolean]) {
+      throw  new Exception("Input enable.auto.commit must be disabled")
     }
   }
 

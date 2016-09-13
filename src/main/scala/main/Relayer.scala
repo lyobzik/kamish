@@ -4,7 +4,7 @@ import java.util
 import java.util.UUID
 
 import com.typesafe.scalalogging.LazyLogging
-import org.apache.kafka.clients.consumer.{ConsumerRebalanceListener, ConsumerRecord, ConsumerRecords, KafkaConsumer}
+import org.apache.kafka.clients.consumer.{ConsumerRebalanceListener, ConsumerRecord, ConsumerRecords, KafkaConsumer, OffsetAndMetadata}
 import org.apache.kafka.clients.producer.{Callback, KafkaProducer, ProducerRecord, RecordMetadata}
 import org.apache.kafka.common.TopicPartition
 
@@ -83,11 +83,9 @@ class RebalancedCallback(private val consumer: KafkaConsumer[String, String],
   }
 }
 
-class ProducedCallback(private val value: String) extends Callback with LazyLogging {
-  override def onCompletion(metadata: RecordMetadata, exception: Exception): Unit = {
-    val exceptDesc = if (exception != null) exception.toString else  "NONE"
-    logger.info(s"Produce record:  ${metadata.partition} - ${metadata.offset}: '$value' with exception $exceptDesc")
-  }
+class Record(outputTopic: String, val inRecord: ConsumerRecord[String, String]) {
+  val outRecord = new ProducerRecord[String, String](outputTopic, inRecord.partition,
+    inRecord.offset.toString, inRecord.value)
 }
 
 class Relayer(private val config: Config) extends LazyLogging {
@@ -105,21 +103,24 @@ class Relayer(private val config: Config) extends LazyLogging {
     logger.info(s"consumer: $consumer")
 
     try {
-      while (!Thread.currentThread.isInterrupted) {
+      while (!Thread.interrupted) {
         val records = consumer.poll(config.pollTimeout.toMillis)
         logger.debug(s"subscription: ${consumer.subscription}")
         logger.debug(s"assignment: ${consumer.assignment}")
         if (records.nonEmpty) {
           logger.info(s"Read ${records.size} records")
         }
-        records.foreach((record: ConsumerRecord[String, String]) => {
-          // TODO: добавить настраиваемое смещение key относительно исходного offset'а.
-          val outputRecord = new ProducerRecord[String, String](config.outputKafkaTopic, record.partition(),
-            record.offset().toString, record.value())
+        // TODO: добавить настраиваемое смещение key относительно исходного offset'а.
+        val committers = records.toList.map(new Record(config.outputKafkaTopic, _))
+        val results = committers.map(c => producer.send(c.outRecord))
+        committers.zip(results).foreach{case(commiter, result) =>
           // TODO: обрабатывать ошибки отправки сообщений, понять посылает ли producer сообщения
           // повторно сам или это нужно делать вручную.
-          producer.send(outputRecord, new ProducedCallback(record.value))
-        })
+          val partition = new TopicPartition(commiter.inRecord.topic, commiter.inRecord.partition)
+          val offset = new OffsetAndMetadata(commiter.inRecord.offset + 1)
+          consumer.commitSync(Map(partition -> offset))
+          logger.info(s"Commit $offset for partition $partition")
+        }
       }
     } catch {
       // TODO: сделать обработку ошибок.
