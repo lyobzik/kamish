@@ -10,8 +10,6 @@ import org.apache.kafka.common.TopicPartition
 
 import collection.JavaConversions._
 
-case class Arguments(config: String = "/etc/kamish.conf")
-
 class OnConsumerRebalance(private val consumer: KafkaConsumer[String, String],
                           private val topic: String,
                           private val inputKafkaConfig: Map[String, Object],
@@ -92,28 +90,8 @@ class OnProduceMessage(private val value: String) extends Callback with LazyLogg
   }
 }
 
-object HelloWorld extends App with LazyLogging {
-  val parser = new scopt.OptionParser[Arguments]("kamish") {
-    opt[String]('c', "config").action((x, c) => c.copy(config = x)).text("path to config file")
-  }
-
-  parser.parse(args, Arguments()) match {
-    case Some(arguments) =>
-      val config = new Config(arguments.config)
-      logger.info(s"run with args: ${arguments.toString}")
-      logger.info(s"run with config: $config")
-
-      val workThread = spawn {
-        work(config)
-      }
-      sys.addShutdownHook({
-        shutdown(config, workThread)
-      })
-
-    case None =>
-  }
-
-  private[this] def work(config: Config): Unit = {
+class Relayer extends LazyLogging {
+  def work(config: Config): Unit = {
     val consumer = new KafkaConsumer[String, String](config.inputKafka)
     val rebalanceListener = new OnConsumerRebalance(consumer, config.outputKafkaTopic,
       config.inputKafka, config.outputKafka)
@@ -151,21 +129,5 @@ object HelloWorld extends App with LazyLogging {
       producer.close()
     }
     logger.info("Work thread stopped")
-  }
-
-  private[this] def shutdown(config: Config, thread: Thread): Unit = {
-    if (thread != null) {
-      thread.interrupt()
-      thread.join(config.shutdownTimeout.toMillis)
-      logger.info("Stopped")
-    }
-  }
-
-  private[this] def spawn(function: => Unit): Thread = {
-    val thread = new Thread(new Runnable {
-      override def run(): Unit = function
-    })
-    thread.start()
-    thread
   }
 }
