@@ -15,10 +15,9 @@ object Kamish extends App with LazyLogging {
       logger.info(s"run with args: ${arguments.toString}")
       logger.info(s"run with config: $config")
 
-      val relayer = new Relayer
-
       val workThread = spawn {
-        relayer.work(config)
+        val relayer = new Relayer(config)
+        relayer.work()
       }
       sys.addShutdownHook({
         shutdown(config, workThread)

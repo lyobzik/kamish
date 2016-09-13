@@ -10,10 +10,10 @@ import org.apache.kafka.common.TopicPartition
 
 import collection.JavaConversions._
 
-class OnConsumerRebalance(private val consumer: KafkaConsumer[String, String],
-                          private val topic: String,
-                          private val inputKafkaConfig: Map[String, Object],
-                          private val outputKafkaConfig: Map[String, Object])
+class RebalancedCallback(private val consumer: KafkaConsumer[String, String],
+                         private val topic: String,
+                         private val inputKafkaConfig: Map[String, Object],
+                         private val outputKafkaConfig: Map[String, Object])
   extends ConsumerRebalanceListener with LazyLogging {
 
   override def onPartitionsRevoked(partitions: util.Collection[TopicPartition]): Unit = {
@@ -83,17 +83,17 @@ class OnConsumerRebalance(private val consumer: KafkaConsumer[String, String],
   }
 }
 
-class OnProduceMessage(private val value: String) extends Callback with LazyLogging {
+class ProducedCallback(private val value: String) extends Callback with LazyLogging {
   override def onCompletion(metadata: RecordMetadata, exception: Exception): Unit = {
     val exceptDesc = if (exception != null) exception.toString else  "NONE"
     logger.info(s"Produce record:  ${metadata.partition} - ${metadata.offset}: '$value' with exception $exceptDesc")
   }
 }
 
-class Relayer extends LazyLogging {
-  def work(config: Config): Unit = {
+class Relayer(private val config: Config) extends LazyLogging {
+  def work(): Unit = {
     val consumer = new KafkaConsumer[String, String](config.inputKafka)
-    val rebalanceListener = new OnConsumerRebalance(consumer, config.outputKafkaTopic,
+    val rebalanceListener = new RebalancedCallback(consumer, config.outputKafkaTopic,
       config.inputKafka, config.outputKafka)
     consumer.subscribe(List(config.inputKafkaTopic), rebalanceListener)
     println("subscription: " + consumer.subscription())
@@ -118,7 +118,7 @@ class Relayer extends LazyLogging {
             record.offset().toString, record.value())
           // TODO: обрабатывать ошибки отправки сообщений, понять посылает ли producer сообщения
           // повторно сам или это нужно делать вручную.
-          producer.send(outputRecord, new OnProduceMessage(record.value))
+          producer.send(outputRecord, new ProducedCallback(record.value))
         })
       }
     } catch {
