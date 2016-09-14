@@ -2,9 +2,9 @@ package main
 
 import com.typesafe.scalalogging.LazyLogging
 
-case class Arguments(config: String = "/etc/kamish.conf")
-
 object Kamish extends App with LazyLogging {
+  case class Arguments(config: String = "/etc/kamish.conf")
+
   val parser = new scopt.OptionParser[Arguments]("kamish") {
     opt[String]('c', "config").action((x, c) => c.copy(config = x)).text("path to config file")
   }
@@ -18,6 +18,7 @@ object Kamish extends App with LazyLogging {
       val workThread = spawn {
         val relayer = new Relayer(config)
         relayer.work()
+        relayer.close()
       }
       sys.addShutdownHook({
         shutdown(config, workThread)

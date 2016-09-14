@@ -3,56 +3,76 @@ package main
 import collection.JavaConversions._
 
 import com.typesafe.scalalogging.LazyLogging
-import org.apache.kafka.clients.consumer.{ConsumerRecord, KafkaConsumer, OffsetAndMetadata}
+import org.apache.kafka.clients.consumer.{ConsumerRecords, KafkaConsumer, OffsetAndMetadata}
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerRecord}
 import org.apache.kafka.common.TopicPartition
 
-class Record(outputTopic: String, val inRecord: ConsumerRecord[String, String]) {
-  val outRecord = new ProducerRecord[String, String](outputTopic, inRecord.partition,
-    inRecord.offset.toString, inRecord.value)
-}
-
 class Relayer(private val config: Config) extends LazyLogging {
+  private type Key = String
+  private type ProducerRecords[K, V] = List[ProducerRecord[K, V]]
+
+  // TODO: хорошо бы научиться менять тип ключа producer'а на основании key.serializer в конфиге.
+  private[this] val producer = new KafkaProducer[Key, String](config.outputKafka)
+  private[this] val consumer = new KafkaConsumer[String, String](config.inputKafka)
+  private[this] val rebalancedCallback = new RebalancedCallback(consumer,
+    config.outputKafkaTopic, config.inputKafka, config.outputKafka)
+
+  private[this] var assignment: java.util.Set[TopicPartition] = _
+
   def work(): Unit = {
-    val consumer = new KafkaConsumer[String, String](config.inputKafka)
-    val rebalanceListener = new RebalancedCallback(consumer, config.outputKafkaTopic,
-      config.inputKafka, config.outputKafka)
-    consumer.subscribe(List(config.inputKafkaTopic), rebalanceListener)
-    println("subscription: " + consumer.subscription())
-    println("assignment: " + consumer.assignment())
-
-    // TODO: хорошо бы научиться менять тип ключа producer'а на основании key.serializer в конфиге.
-    val producer = new KafkaProducer[String, String](config.outputKafka)
-
-    logger.info(s"consumer: $consumer")
+    consumer.subscribe(List(config.inputKafkaTopic), rebalancedCallback)
 
     try {
       while (!Thread.interrupted) {
-        val records = consumer.poll(config.pollTimeout.toMillis)
-        logger.debug(s"subscription: ${consumer.subscription}")
-        logger.debug(s"assignment: ${consumer.assignment}")
-        if (records.nonEmpty) {
-          logger.info(s"Read ${records.size} records")
-        }
-        // TODO: добавить настраиваемое смещение key относительно исходного offset'а.
-        val committers = records.toList.map(new Record(config.outputKafkaTopic, _))
-        val results = committers.map(c => producer.send(c.outRecord))
-        committers.zip(results).foreach{case(commiter, result) =>
-          // TODO: обрабатывать ошибки отправки сообщений, понять посылает ли producer сообщения
-          // повторно сам или это нужно делать вручную.
-          val partition = new TopicPartition(commiter.inRecord.topic, commiter.inRecord.partition)
-          val offset = new OffsetAndMetadata(commiter.inRecord.offset + 1)
-          consumer.commitSync(Map(partition -> offset))
-          logger.info(s"Commit $offset for partition $partition")
-        }
+        val inRecords = read()
+        val outRecords = convertRecords(inRecords)
+        write(inRecords, outRecords)
       }
     } catch {
       // TODO: сделать обработку ошибок.
       case err: Exception => logger.error(s"Error: $err")
-    } finally {
-      consumer.close()
-      producer.close()
     }
+
     logger.info("Work thread stopped")
+  }
+
+  def close(): Unit = {
+    consumer.close()
+    producer.close()
+  }
+
+  private[this] def read(): ConsumerRecords[String, String] = {
+    val inRecords = consumer.poll(config.pollTimeout.toMillis)
+    if (assignment != consumer.assignment) {
+      logger.info(s"Consumer assignment changed from $assignment to ${consumer.assignment}")
+      assignment = consumer.assignment
+    }
+    if (inRecords.nonEmpty) {
+      logger.debug(s"Read ${inRecords.size} records")
+    }
+    inRecords
+  }
+
+  private[this] def write(inRecords: ConsumerRecords[String, String],
+                          outRecords: ProducerRecords[Key, String]): Unit = {
+    val results = outRecords.map(record => producer.send(record))
+    inRecords.zip(results).foreach{
+      case(record, result) =>
+        // TODO: обрабатывать ошибки отправки сообщений, понять посылает ли producer сообщения
+        // повторно сам или это нужно делать вручную.
+        val partition = new TopicPartition(record.topic, record.partition)
+        val offset = new OffsetAndMetadata(record.offset + 1)
+        consumer.commitSync(Map(partition -> offset))
+
+        logger.debug(s"Commit $offset for partition $partition")
+    }
+  }
+
+  private[this] def convertRecords(inRecords: ConsumerRecords[String, String]):
+    ProducerRecords[Key, String] = {
+
+    // TODO: добавить настраиваемое смещение key относительно исходного offset'а.
+    inRecords.toList.map(record => new ProducerRecord[Key, String](config.outputKafkaTopic,
+      record.partition, record.offset.toString, record.value))
   }
 }
