@@ -3,6 +3,7 @@ package main
 import collection.JavaConversions._
 
 import com.typesafe.scalalogging.LazyLogging
+
 import org.apache.kafka.clients.consumer.{ConsumerRecords, KafkaConsumer, OffsetAndMetadata}
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerRecord}
 import org.apache.kafka.common.TopicPartition
@@ -56,8 +57,12 @@ class Relayer(private val config: Config) extends LazyLogging {
   private[this] def write(inRecords: ConsumerRecords[String, String],
                           outRecords: ProducerRecords[Key, String]): Unit = {
     val results = outRecords.map(record => producer.send(record))
-    inRecords.zip(results).foreach{
-      case(record, result) =>
+    if (results.nonEmpty) {
+      logger.info(s"Results: $results")
+    }
+    inRecords.zip(results).foreach{case(record, result) =>
+      try {
+        val _ = result.get()
         // TODO: обрабатывать ошибки отправки сообщений, понять посылает ли producer сообщения
         // повторно сам или это нужно делать вручную.
         val partition = new TopicPartition(record.topic, record.partition)
@@ -65,6 +70,12 @@ class Relayer(private val config: Config) extends LazyLogging {
         consumer.commitSync(Map(partition -> offset))
 
         logger.debug(s"Commit $offset for partition $partition")
+      } catch {
+        case err: Exception =>
+          logger.error(s"""Cannot produce message from (${record.topic}, ${record.partition}) with
+            | offset [${record.offset}]: '${record.value}'. Error: ${err.getMessage}""".
+            stripMargin.replaceAll("\n", " "))
+      }
     }
   }
 
